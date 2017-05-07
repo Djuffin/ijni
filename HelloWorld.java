@@ -7,7 +7,7 @@ public class HelloWorld {
     	System.load(new File("./native_lib.so").getAbsolutePath());
     	int x = add(3, 4);
         System.out.println("The number is " + String.valueOf(x));
-    	int y = add(30, 40);
+    	int y = add(-30, 40);
         System.out.println("The number is " + String.valueOf(y));
     }
 

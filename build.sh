@@ -3,4 +3,4 @@ if [ -z "$JAVA_HOME" ]; then
 fi
 javac -g HelloWorld.java
 javah HelloWorld
-g++ -I"${JAVA_HOME}/include" -I"${JAVA_HOME}/include/linux" `llvm-config --cxxflags --ldflags --libs engine` -g -fPIC -shared native_lib.cpp -o native_lib.so
+g++ -I"${JAVA_HOME}/include" -I"${JAVA_HOME}/include/linux"  `llvm-config --cxxflags --ldflags --libs engine` -g -fPIC -shared native_lib.cpp -o native_lib.so

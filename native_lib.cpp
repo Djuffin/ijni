@@ -1,6 +1,7 @@
 #include <jni.h>
 #include <jvmti.h>
 
+#include "llvm/Support/DynamicLibrary.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ExecutionEngine/ExecutionEngine.h"
 #include "llvm/ExecutionEngine/GenericValue.h"
@@ -32,13 +33,15 @@ typedef jint (*add_ptr)(JNIEnv *, jclass, jint, jint);
 
 
 
-extern "C" int wrap(int x) {
+extern "C" int wrap1(int x) {
   return x ^ 0x20000;
 }
 
 class MyJIT {
  public:
   MyJIT() {
+
+    llvm::sys::DynamicLibrary::LoadLibraryPermanently(nullptr);
     InitializeNativeTarget();
     LLVMInitializeNativeAsmPrinter();
     LLVMInitializeNativeAsmParser();
@@ -58,26 +61,24 @@ class MyJIT {
       return nullptr;
     }
 
+
+    Function* wrap_f = llvm::Function::Create(ParseJavaSignature("(I)I"), Function::ExternalLinkage, "abs", module_);
+    //engine_->addGlobalMapping(wrap_f, reinterpret_cast<void*>(::wrap1));
+
     Function *FooF = cast<Function>(module_->getOrInsertFunction("foo", func_type));
     std::vector<Value *>args;
     for (auto it = FooF->arg_begin(); it != FooF->arg_end(); ++it) {
       args.push_back(&*it);
     }
 
-    // Add a basic block to the FooF function.
     BasicBlock *BB = BasicBlock::Create(*context_, "EntryBlock", FooF);
-
-    // Create a basic block builder with default parameters.  The builder will
-    // automatically append instructions to the basic block `BB'.
     IRBuilder<> builder(BB);
 
-    // Get pointer to the constant `10'.
-    Value *Sum = builder.CreateAdd(args[2], args[3]);
+    Value *Sum = builder.CreateCall(wrap_f, std::vector<Value *>{args[2]});
+    //Value *Sum = builder.CreateAdd(args[2], args[3]);
 
-    // Create the return instruction and add it to the basic block.
     builder.CreateRet(Sum);
 
-    // Now we create the JIT.
     void *result = engine_->getPointerToFunction(FooF);
     return result;
   }
@@ -177,12 +178,7 @@ JNIEXPORT jint JNICALL Java_HelloWorld_sub (JNIEnv *env, jclass cls, jint a, jin
 }
 
 JNIEXPORT jint JNICALL Java_HelloWorld_add (JNIEnv *env, jclass cls, jint a, jint b) {
-  static JNINativeMethod m;
-  m.name = (char*)"add";
-  m.signature = (char*)"(II)I";
-  m.fnPtr = (void*)Java_HelloWorld_sub;
-  env->RegisterNatives(cls, &m, 1);
-  return a + b;
+  return -11;
 }
 
 JNIEXPORT jint JNICALL secret_callback (JNIEnv *env, jclass cls, jint a, jint b) {
@@ -208,7 +204,7 @@ NativeMethodBind(jvmtiEnv *ti,
             void** new_address_ptr) {
   char* name_ptr = nullptr;
   char* signature_ptr = nullptr;
-  jvmtiError error = ti->GetMethodName(method, &name_ptr, &signature_ptr, nullptr);
+  ti->GetMethodName(method, &name_ptr, &signature_ptr, nullptr);
   std::string fname (name_ptr);
   if (fname == "add") {
     *new_address_ptr = gen_function2();
