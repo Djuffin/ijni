@@ -27,57 +27,150 @@
 #include <vector>
 
 #include "HelloWorld.h"
+using namespace llvm;
 typedef jint (*add_ptr)(JNIEnv *, jclass, jint, jint);
 
-void* gen_function() {
-  using namespace llvm;
-  InitializeNativeTarget();
-  LLVMInitializeNativeAsmPrinter();
-  LLVMInitializeNativeAsmParser();
 
-  LLVMContext *pContext = new LLVMContext();
-  LLVMContext &Context = *pContext;
 
-  // Create some module to put our function into it.
-  std::unique_ptr<Module> Owner = make_unique<Module>("test", Context);
-  Module *M = Owner.get();
-
-  // Now we're going to create function `foo', which returns an int and takes no
-  // arguments.
-  Function *FooF =
-    cast<Function>(M->getOrInsertFunction("foo", Type::getInt32Ty(Context),
-      Type::getDoublePtrTy(Context), Type::getDoublePtrTy(Context),
-          Type::getInt32Ty(Context), Type::getInt32Ty(Context), nullptr));
-
-  // Add a basic block to the FooF function.
-  BasicBlock *BB = BasicBlock::Create(Context, "EntryBlock", FooF);
-
-  // Create a basic block builder with default parameters.  The builder will
-  // automatically append instructions to the basic block `BB'.
-  IRBuilder<> builder(BB);
-
-  // Tell the basic block builder to attach itself to the new basic block
-  builder.SetInsertPoint(BB);
-
-  // Get pointer to the constant `10'.
-  Value *Ten = builder.getInt32(10);
-
-  // Create the return instruction and add it to the basic block.
-  builder.CreateRet(Ten);
-
-  // Now we create the JIT.
-  EngineBuilder EB(std::move(Owner));
-  EB.setMCJITMemoryManager(make_unique<SectionMemoryManager>());
-  EB.setUseOrcMCJITReplacement(true);
-  ExecutionEngine* EE = EB.create();
-  EE->finalizeObject();
-
-  //delete EE;
-  //llvm_shutdown();
-  void *result = EE->getPointerToFunction(FooF);
-  ((add_ptr)result)(nullptr, nullptr, 3, 4);
-  return result;
+extern "C" int wrap(int x) {
+  return x ^ 0x20000;
 }
+
+class MyJIT {
+ public:
+  MyJIT() {
+    InitializeNativeTarget();
+    LLVMInitializeNativeAsmPrinter();
+    LLVMInitializeNativeAsmParser();
+    context_ = make_unique<LLVMContext>();
+    auto module = make_unique<Module>("ti-agent-module", *context_);
+    module_ = module.get();
+
+    EngineBuilder EB(std::move(module));
+    EB.setMCJITMemoryManager(make_unique<SectionMemoryManager>());
+    EB.setUseOrcMCJITReplacement(true);
+    engine_ = std::move(std::unique_ptr<ExecutionEngine>(EB.create()));
+  }
+
+  void *gen_function() {
+    FunctionType *func_type = ParseJavaSignature("(II)I", 2);
+    if (func_type == nullptr) {
+      return nullptr;
+    }
+
+    Function *FooF = cast<Function>(module_->getOrInsertFunction("foo", func_type));
+    std::vector<Value *>args;
+    for (auto it = FooF->arg_begin(); it != FooF->arg_end(); ++it) {
+      args.push_back(&*it);
+    }
+
+    // Add a basic block to the FooF function.
+    BasicBlock *BB = BasicBlock::Create(*context_, "EntryBlock", FooF);
+
+    // Create a basic block builder with default parameters.  The builder will
+    // automatically append instructions to the basic block `BB'.
+    IRBuilder<> builder(BB);
+
+    // Get pointer to the constant `10'.
+    Value *Sum = builder.CreateAdd(args[2], args[3]);
+
+    // Create the return instruction and add it to the basic block.
+    builder.CreateRet(Sum);
+
+    // Now we create the JIT.
+    void *result = engine_->getPointerToFunction(FooF);
+    return result;
+  }
+
+ private:
+  llvm::Type *GetPointerType() {
+    return Type::getVoidTy(*context_)->getPointerTo();
+  }
+
+  FunctionType *ParseJavaSignature(const char *str, int extraPtrArgs = 0) {
+    if (str == nullptr) return nullptr;
+    const char* ptr = str;
+    std::function<Type*()> consumeType =
+      [&ptr, &consumeType, this]()->Type * {
+      switch (*ptr) {
+        case 'Z':
+          ptr++;
+          return Type::getInt8Ty(*context_);
+        case 'B':
+          ptr++;
+          return Type::getInt8Ty(*context_);
+        case 'C':
+          ptr++;
+          return Type::getInt16Ty(*context_);
+        case 'S':
+          ptr++;
+          return Type::getInt16Ty(*context_);
+        case 'I':
+          ptr++;
+          return Type::getInt32Ty(*context_);
+        case 'J':
+          ptr++;
+          return Type::getInt64Ty(*context_);
+        case 'F':
+          ptr++;
+          return Type::getFloatTy(*context_);
+        case 'D':
+          ptr++;
+          return Type::getDoubleTy(*context_);
+        case 'V':
+          ptr++;
+          return Type::getVoidTy(*context_);
+        case 'L':
+          while (*ptr && *ptr != ';') ptr++;
+          if (*ptr == ';') {
+            ptr++;
+            return GetPointerType();
+          } else {
+            return nullptr;
+          }
+        case '[': {
+          ptr++;
+          if (consumeType())
+            return GetPointerType();
+          else
+            return nullptr;
+        }
+        default:
+          return nullptr;
+      };
+    };
+
+    if (*ptr != '(') return nullptr;
+    ptr++;
+    std::vector<Type*> args;
+    for (;extraPtrArgs > 0; --extraPtrArgs) {
+      args.push_back(GetPointerType());
+    }
+    Type *returnType;
+    while (*ptr && *ptr != ')') {
+      auto type = consumeType();
+      if (type == nullptr) return nullptr;
+      args.push_back(type);
+    }
+    if (*ptr != ')') return nullptr;
+    ptr++;
+    returnType = consumeType();
+    if (returnType == nullptr || *ptr) return nullptr;
+
+    return FunctionType::get(returnType, args, false);
+
+  }
+
+  std::unique_ptr<LLVMContext> context_;
+  std::unique_ptr<ExecutionEngine> engine_;
+  Module* module_;
+};
+
+void *gen_function2() {
+  static MyJIT jit;
+  return jit.gen_function();
+}
+
 
 JNIEXPORT jint JNICALL Java_HelloWorld_sub (JNIEnv *env, jclass cls, jint a, jint b) {
   return sizeof(jobject);
@@ -118,7 +211,7 @@ NativeMethodBind(jvmtiEnv *ti,
   jvmtiError error = ti->GetMethodName(method, &name_ptr, &signature_ptr, nullptr);
   std::string fname (name_ptr);
   if (fname == "add") {
-    *new_address_ptr = gen_function();
+    *new_address_ptr = gen_function2();
     printf("code generated for %s\n", name_ptr);
   }
   ti->Deallocate((unsigned char *)name_ptr);
