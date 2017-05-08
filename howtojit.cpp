@@ -54,13 +54,90 @@
 #include "llvm/Support/ManagedStatic.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ExecutionEngine/ExecutionEngine.h"
+#include "llvm/ExecutionEngine/JITSymbol.h"
+#include "llvm/ExecutionEngine/RuntimeDyld.h"
+#include "llvm/ExecutionEngine/SectionMemoryManager.h"
+#include "llvm/ExecutionEngine/Orc/CompileUtils.h"
+#include "llvm/ExecutionEngine/Orc/IRCompileLayer.h"
+#include "llvm/ExecutionEngine/Orc/LambdaResolver.h"
+//#include "llvm/ExecutionEngine/Orc/RTDyldObjectLinkingLayer.h"
+#include "llvm/ExecutionEngine/Orc/ObjectLinkingLayer.h"
+#include "llvm/IR/DataLayout.h"
+#include "llvm/IR/Mangler.h"
+#include "llvm/Support/DynamicLibrary.h"
+#include "llvm/Support/raw_ostream.h"
+#include "llvm/Target/TargetMachine.h"
 #include <algorithm>
 #include <cassert>
+
 #include <memory>
 #include <vector>
 
 using namespace llvm;
+using namespace llvm::orc;
+
 typedef int (*f_ptr)();
+
+class KaleidoscopeJIT {
+private:
+  std::unique_ptr<TargetMachine> TM;
+  const DataLayout DL;
+  ObjectLinkingLayer<> ObjectLayer;
+  IRCompileLayer<decltype(ObjectLayer)> CompileLayer;
+
+public:
+  typedef decltype(CompileLayer)::ModuleSetHandleT ModuleHandle;
+
+  KaleidoscopeJIT()
+      : TM(EngineBuilder().selectTarget()), DL(TM->createDataLayout()),
+        CompileLayer(ObjectLayer, SimpleCompiler(*TM)) {
+    llvm::sys::DynamicLibrary::LoadLibraryPermanently(nullptr);
+  }
+
+  TargetMachine &getTargetMachine() { return *TM; }
+
+  ModuleHandle addModule(std::unique_ptr<Module> M) {
+    // Build our symbol resolver:
+    // Lambda 1: Look back into the JIT itself to find symbols that are part of
+    //           the same "logical dylib".
+    // Lambda 2: Search for external symbols in the host process.
+    auto Resolver = createLambdaResolver(
+        [&](const std::string &Name) {
+          if (auto Sym = CompileLayer.findSymbol(Name, false))
+            return Sym;
+          return JITSymbol(nullptr);
+        },
+        [](const std::string &Name) {
+          if (auto SymAddr =
+                RTDyldMemoryManager::getSymbolAddressInProcess(Name))
+            return JITSymbol(SymAddr, JITSymbolFlags::Exported);
+          return JITSymbol(nullptr);
+        });
+
+    // Build a singleton module set to hold our module.
+    std::vector<std::unique_ptr<Module>> Ms;
+    Ms.push_back(std::move(M));
+
+    // Add the set to the JIT with the resolver we created above and a newly
+    // created SectionMemoryManager.
+    return CompileLayer.addModuleSet(std::move(Ms),
+                                     make_unique<SectionMemoryManager>(),
+                                     std::move(Resolver));
+  }
+
+  JITSymbol findSymbol(const std::string Name) {
+    std::string MangledName;
+    raw_string_ostream MangledNameStream(MangledName);
+    Mangler::getNameWithPrefix(MangledNameStream, Name, DL);
+    return CompileLayer.findSymbol(MangledNameStream.str(), true);
+  }
+
+  void removeModule(ModuleHandle H) {
+    CompileLayer.removeModuleSet(H);
+  }
+};
 
 int main() {
   InitializeNativeTarget();
@@ -124,35 +201,26 @@ int main() {
   // Create the return instruction and add it to the basic block.
   builder.CreateRet(Add1CallRes);
 
+
   // Now we create the JIT.
-  EngineBuilder EB(std::move(Owner));
-  EB.setMCJITMemoryManager(make_unique<SectionMemoryManager>());
-  EB.setUseOrcMCJITReplacement(true);
-  ExecutionEngine* EE = EB.create();
-  EE->finalizeObject();
-  outs() << "We just constructed this LLVM module:\n\n" << *M;
-  outs() << "\n\nRunning foo: ";
-  outs().flush();
+  // EngineBuilder EB(std::move(Owner));
+  // EB.setMCJITMemoryManager(make_unique<SectionMemoryManager>());
+  // EB.setUseOrcMCJITReplacement(true);
+  // ExecutionEngine* EE = EB.create();
+  // EE->finalizeObject();
 
-  // Call the `foo' function with no arguments:
-  std::vector<GenericValue> noargs;
-  // GenericValue gv = EE->runFunction(FooF, noargs);
-
- // Import result of execution:
-  //outs() << "Result: " << gv.IntVal << "\n";
-  //EE->generateCodeForModule(M);
-  EE->getPointerToFunction  (FooF);
-  //void *fp = EE->getPointerToFunction  (FooF);
+  //auto fp = jit.findSymbol("foo").getAddress();
+  //outs() << "Func foo: " << fp << "\n";
   //int result = ((f_ptr)fp)();
-  //outs() << "Result2: " << result << "\n";
+  //outs() << "Result foo: " << result << "\n";
 
 
   ///--------------------
   Function *Z =
-    cast<Function>(M->getOrInsertFunction("z", Type::getInt32Ty(Context), nullptr));
+    cast<Function>(M->getOrInsertFunction("zzz", Type::getInt32Ty(Context), nullptr));
 
   // Add a basic block to the FooF function.
-  BB = BasicBlock::Create(Context, "EntryBlock", Z);
+  BB = BasicBlock::Create(Context, "", Z);
 
   // Tell the basic block builder to attach itself to the new basic block
   builder.SetInsertPoint(BB);
@@ -160,21 +228,21 @@ int main() {
   // Get pointer to the constant `10'.
   Ten = builder.getInt32(10);
 
-  // Pass Ten to the call to Add1F
-  //CallInst *Add1CallRes = builder.CreateCall(Add1F, Ten);
-  //Add1CallRes->setTailCall(true);
 
   // Create the return instruction and add it to the basic block.
   builder.CreateRet(Ten);
   ///--------------------
 
-  void *fp = EE->getPointerToFunction  (Z);
-  outs() << "Func3: " << fp << "\n";
-  outs() << *M;
-  int result = ((f_ptr)fp)();
-  outs() << "Result3: " << result << "\n";
 
-  delete EE;
-  llvm_shutdown();
+  KaleidoscopeJIT jit;
+  jit.addModule(std::move(Owner));
+
+  auto fp = jit.findSymbol("zzz").getAddress();
+  outs() << "Func zzz: " << fp << "\n";
+  auto result = ((f_ptr)fp)();
+  outs() << "Result zzz: " << result << "\n";
+//
+  //delete EE;
+  //llvm_shutdown();
   return 0;
 }

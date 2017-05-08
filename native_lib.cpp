@@ -50,10 +50,8 @@ class Codegen {
     LLVMInitializeNativeAsmPrinter();
     LLVMInitializeNativeAsmParser();
     context_ = make_unique<LLVMContext>();
-    auto module = make_unique<Module>("ti-agent-module", *context_);
-    module_ = module.get();
 
-    EngineBuilder EB(std::move(module));
+    EngineBuilder EB(std::move(make_unique<Module>("default_module", *context_)));
     EB.setMCJITMemoryManager(make_unique<SectionMemoryManager>());
     EB.setUseOrcMCJITReplacement(true);
     EB.setErrorStr(&error_str);
@@ -67,11 +65,14 @@ class Codegen {
       return nullptr;
     }
 
+    auto module = make_unique<Module>("ti-agent-module", *context_);
+    auto M = module.get();
+    engine_->addModule(std::move(module));
 
-    Function* wrap_int = llvm::Function::Create(ParseJavaSignature("(I)I"), Function::ExternalLinkage, "wrap_int", module_);
-    Function* print_ref = llvm::Function::Create(ParseJavaSignature("(L;)V"), Function::ExternalLinkage, "print_ref", module_);
+    Function* wrap_int = llvm::Function::Create(ParseJavaSignature("(I)I"), Function::ExternalLinkage, "wrap_int", M);
+    Function* print_ref = llvm::Function::Create(ParseJavaSignature("(L;)V"), Function::ExternalLinkage, "print_ref", M);
 
-    Function *F = cast<Function>(module_->getOrInsertFunction("foo", func_type));
+    Function *F = cast<Function>(M->getOrInsertFunction("foo", func_type));
     std::vector<Value *>args;
     for (auto it = F->arg_begin(); it != F->arg_end(); ++it) {
       args.push_back(&*it);
@@ -98,7 +99,10 @@ class Codegen {
       return nullptr;
     }
 
-    Function *F = cast<Function>(module_->getOrInsertFunction(name, func_type));
+    auto module = make_unique<Module>(std::string(name) + "_mod", *context_);
+    auto M = module.get();
+
+    Function *F = cast<Function>(M->getOrInsertFunction(name, func_type));
     std::vector<Value *>args;
     for (auto it = F->arg_begin(); it != F->arg_end(); ++it) {
       args.push_back(&*it);
@@ -111,6 +115,7 @@ class Codegen {
     Value *ret = builder.CreateCall(func_value, args);
     builder.CreateRet(ret);
 
+    engine_->addModule(std::move(module));
     void *result = engine_->getPointerToFunction(F);
     if(result == nullptr) {
       printf("ERROR %s\n", error_str.c_str());
@@ -199,7 +204,6 @@ class Codegen {
 
   std::unique_ptr<LLVMContext> context_;
   std::unique_ptr<ExecutionEngine> engine_;
-  Module* module_;
   std::string error_str;
 };
 
@@ -240,10 +244,9 @@ NativeMethodBind(jvmtiEnv *ti,
   char* signature_ptr = nullptr;
   ti->GetMethodName(method, &name_ptr, &signature_ptr, nullptr);
   std::string fname (name_ptr);
-  if (fname == "add") {
+  // if (fname == "add") {
     *new_address_ptr = gen_function(name_ptr, signature_ptr, address);
-    //*new_address_ptr = gen_function(name_ptr, signature_ptr, address);
-  }
+  // }
   ti->Deallocate((unsigned char *)name_ptr);
   ti->Deallocate((unsigned char *)signature_ptr);
 }
