@@ -1,3 +1,4 @@
+#include <dlfcn.h>
 #include <jni.h>
 #include <jvmti.h>
 
@@ -31,17 +32,20 @@
 using namespace llvm;
 typedef jint (*add_ptr)(JNIEnv *, jclass, jint, jint);
 
-
-
-extern "C" int wrap1(int x) {
-  return x ^ 0x20000;
+int wrap_int(int x) {
+  printf("Integer: %d\n", x);
+  return x;
 }
 
-class MyJIT {
- public:
-  MyJIT() {
+void print_ref(void *ref) {
+  printf("Reference: %p\n", ref);
+}
 
-    llvm::sys::DynamicLibrary::LoadLibraryPermanently(nullptr);
+class Codegen {
+ public:
+  Codegen() {
+    llvm::sys::DynamicLibrary::AddSymbol("wrap_int", reinterpret_cast<void*>(wrap_int));
+    llvm::sys::DynamicLibrary::AddSymbol("print_ref", reinterpret_cast<void*>(print_ref));
     InitializeNativeTarget();
     LLVMInitializeNativeAsmPrinter();
     LLVMInitializeNativeAsmParser();
@@ -62,24 +66,50 @@ class MyJIT {
     }
 
 
-    Function* wrap_f = llvm::Function::Create(ParseJavaSignature("(I)I"), Function::ExternalLinkage, "abs", module_);
-    //engine_->addGlobalMapping(wrap_f, reinterpret_cast<void*>(::wrap1));
+    Function* wrap_int = llvm::Function::Create(ParseJavaSignature("(I)I"), Function::ExternalLinkage, "wrap_int", module_);
+    Function* print_ref = llvm::Function::Create(ParseJavaSignature("(L;)V"), Function::ExternalLinkage, "print_ref", module_);
 
-    Function *FooF = cast<Function>(module_->getOrInsertFunction("foo", func_type));
+    Function *F = cast<Function>(module_->getOrInsertFunction("foo", func_type));
     std::vector<Value *>args;
-    for (auto it = FooF->arg_begin(); it != FooF->arg_end(); ++it) {
+    for (auto it = F->arg_begin(); it != F->arg_end(); ++it) {
       args.push_back(&*it);
     }
 
-    BasicBlock *BB = BasicBlock::Create(*context_, "EntryBlock", FooF);
+    BasicBlock *BB = BasicBlock::Create(*context_, "EntryBlock", F);
     IRBuilder<> builder(BB);
 
-    Value *Sum = builder.CreateCall(wrap_f, std::vector<Value *>{args[2]});
-    //Value *Sum = builder.CreateAdd(args[2], args[3]);
+    builder.CreateCall(print_ref, std::vector<Value *>{args[1]});
+    Value *arg1 = builder.CreateCall(wrap_int, std::vector<Value *>{args[2]});
+    Value *arg2 = builder.CreateCall(wrap_int, std::vector<Value *>{args[3]});
+    Value *Sum = builder.CreateAdd(arg1, arg2);
 
     builder.CreateRet(Sum);
 
-    void *result = engine_->getPointerToFunction(FooF);
+    void *result = engine_->getPointerToFunction(F);
+    return result;
+  }
+
+  void *gen_transparent_wrapper(const char *name, char *signature, void *func_ptr) {
+    FunctionType *func_type = ParseJavaSignature(signature, 2);
+    if (func_type == nullptr) {
+      return nullptr;
+    }
+
+    Function *F = cast<Function>(module_->getOrInsertFunction(name, func_type));
+    std::vector<Value *>args;
+    for (auto it = F->arg_begin(); it != F->arg_end(); ++it) {
+      args.push_back(&*it);
+    }
+
+    BasicBlock *BB = BasicBlock::Create(*context_, "EntryBlock", F);
+    IRBuilder<> builder(BB);
+
+    Value* func_value = builder.CreateIntToPtr(builder.getInt64((uint64_t)func_ptr),func_type->getPointerTo());
+    Value *ret = builder.CreateCall(func_value, args);
+
+    builder.CreateRet(ret);
+
+    void *result = engine_->getPointerToFunction(F);
     return result;
   }
 
@@ -167,22 +197,20 @@ class MyJIT {
   Module* module_;
 };
 
-void *gen_function2() {
-  static MyJIT jit;
-  return jit.gen_function();
+void *gen_function(char* name_base, char *signature, void *func_ptr) {
+  static Codegen codegen;
+  static int n = 0;
+  std::string name = std::string(name_base) + "_ti_" + std::to_string(n++);
+  printf("Signature: %s\n", signature);
+  void *result = codegen.gen_transparent_wrapper(name.c_str(), signature, func_ptr);
+  printf("code generated for %s = %p\n", name.c_str(), result);
+  return result;
 }
 
-
-JNIEXPORT jint JNICALL Java_HelloWorld_sub (JNIEnv *env, jclass cls, jint a, jint b) {
-  return sizeof(jobject);
-}
 
 JNIEXPORT jint JNICALL Java_HelloWorld_add (JNIEnv *env, jclass cls, jint a, jint b) {
+  printf("Real add was called with args %d %d\n", a, b);
   return -11;
-}
-
-JNIEXPORT jint JNICALL secret_callback (JNIEnv *env, jclass cls, jint a, jint b) {
-  return 42;
 }
 
 jvmtiEnv* CreateJvmtiEnv(JavaVM* vm) {
@@ -207,8 +235,7 @@ NativeMethodBind(jvmtiEnv *ti,
   ti->GetMethodName(method, &name_ptr, &signature_ptr, nullptr);
   std::string fname (name_ptr);
   if (fname == "add") {
-    *new_address_ptr = gen_function2();
-    printf("code generated for %s\n", name_ptr);
+    *new_address_ptr = gen_function(name_ptr, signature_ptr, address);
   }
   ti->Deallocate((unsigned char *)name_ptr);
   ti->Deallocate((unsigned char *)signature_ptr);
