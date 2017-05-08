@@ -141,9 +141,38 @@ int main() {
  // Import result of execution:
   //outs() << "Result: " << gv.IntVal << "\n";
   //EE->generateCodeForModule(M);
-  void *fp = EE->getPointerToFunction  (FooF);
+  EE->getPointerToFunction  (FooF);
+  //void *fp = EE->getPointerToFunction  (FooF);
+  //int result = ((f_ptr)fp)();
+  //outs() << "Result2: " << result << "\n";
+
+
+  ///--------------------
+  Function *Z =
+    cast<Function>(M->getOrInsertFunction("z", Type::getInt32Ty(Context), nullptr));
+
+  // Add a basic block to the FooF function.
+  BB = BasicBlock::Create(Context, "EntryBlock", Z);
+
+  // Tell the basic block builder to attach itself to the new basic block
+  builder.SetInsertPoint(BB);
+
+  // Get pointer to the constant `10'.
+  Ten = builder.getInt32(10);
+
+  // Pass Ten to the call to Add1F
+  //CallInst *Add1CallRes = builder.CreateCall(Add1F, Ten);
+  //Add1CallRes->setTailCall(true);
+
+  // Create the return instruction and add it to the basic block.
+  builder.CreateRet(Ten);
+  ///--------------------
+
+  void *fp = EE->getPointerToFunction  (Z);
+  outs() << "Func3: " << fp << "\n";
+  outs() << *M;
   int result = ((f_ptr)fp)();
-  outs() << "Result2: " << result << "\n";
+  outs() << "Result3: " << result << "\n";
 
   delete EE;
   llvm_shutdown();

@@ -56,12 +56,14 @@ class Codegen {
     EngineBuilder EB(std::move(module));
     EB.setMCJITMemoryManager(make_unique<SectionMemoryManager>());
     EB.setUseOrcMCJITReplacement(true);
+    EB.setErrorStr(&error_str);
     engine_ = std::move(std::unique_ptr<ExecutionEngine>(EB.create()));
   }
 
   void *gen_function() {
     FunctionType *func_type = ParseJavaSignature("(II)I", 2);
     if (func_type == nullptr) {
+      printf("Can't parse signature\n");
       return nullptr;
     }
 
@@ -92,6 +94,7 @@ class Codegen {
   void *gen_transparent_wrapper(const char *name, char *signature, void *func_ptr) {
     FunctionType *func_type = ParseJavaSignature(signature, 2);
     if (func_type == nullptr) {
+      printf("Can't parse signature %s\n", signature);
       return nullptr;
     }
 
@@ -101,15 +104,17 @@ class Codegen {
       args.push_back(&*it);
     }
 
-    BasicBlock *BB = BasicBlock::Create(*context_, "EntryBlock", F);
+    BasicBlock *BB = BasicBlock::Create(*context_, "", F);
     IRBuilder<> builder(BB);
 
     Value* func_value = builder.CreateIntToPtr(builder.getInt64((uint64_t)func_ptr),func_type->getPointerTo());
     Value *ret = builder.CreateCall(func_value, args);
-
     builder.CreateRet(ret);
 
     void *result = engine_->getPointerToFunction(F);
+    if(result == nullptr) {
+      printf("ERROR %s\n", error_str.c_str());
+    }
     return result;
   }
 
@@ -195,6 +200,7 @@ class Codegen {
   std::unique_ptr<LLVMContext> context_;
   std::unique_ptr<ExecutionEngine> engine_;
   Module* module_;
+  std::string error_str;
 };
 
 void *gen_function(char* name_base, char *signature, void *func_ptr) {
@@ -236,6 +242,7 @@ NativeMethodBind(jvmtiEnv *ti,
   std::string fname (name_ptr);
   if (fname == "add") {
     *new_address_ptr = gen_function(name_ptr, signature_ptr, address);
+    //*new_address_ptr = gen_function(name_ptr, signature_ptr, address);
   }
   ti->Deallocate((unsigned char *)name_ptr);
   ti->Deallocate((unsigned char *)signature_ptr);
