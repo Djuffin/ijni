@@ -33,19 +33,18 @@ using namespace llvm;
 typedef jint (*add_ptr)(JNIEnv *, jclass, jint, jint);
 
 int wrap_int(int x) {
-  printf("Integer: %d\n", x);
   return x;
 }
 
-void print_ref(void *ref) {
-  printf("Reference: %p\n", ref);
+void* wrap_ref(void *ref) {
+  return ref;
 }
 
 class Codegen {
  public:
   Codegen() {
     llvm::sys::DynamicLibrary::AddSymbol("wrap_int", reinterpret_cast<void*>(wrap_int));
-    llvm::sys::DynamicLibrary::AddSymbol("print_ref", reinterpret_cast<void*>(print_ref));
+    llvm::sys::DynamicLibrary::AddSymbol("wrap_ref", reinterpret_cast<void*>(wrap_ref));
     InitializeNativeTarget();
     LLVMInitializeNativeAsmPrinter();
     LLVMInitializeNativeAsmParser();
@@ -58,40 +57,6 @@ class Codegen {
     engine_ = std::move(std::unique_ptr<ExecutionEngine>(EB.create()));
   }
 
-  void *gen_function() {
-    FunctionType *func_type = ParseJavaSignature("(II)I", 2);
-    if (func_type == nullptr) {
-      printf("Can't parse signature\n");
-      return nullptr;
-    }
-
-    auto module = make_unique<Module>("ti-agent-module", *context_);
-    auto M = module.get();
-    engine_->addModule(std::move(module));
-
-    Function* wrap_int = llvm::Function::Create(ParseJavaSignature("(I)I"), Function::ExternalLinkage, "wrap_int", M);
-    Function* print_ref = llvm::Function::Create(ParseJavaSignature("(L;)V"), Function::ExternalLinkage, "print_ref", M);
-
-    Function *F = cast<Function>(M->getOrInsertFunction("foo", func_type));
-    std::vector<Value *>args;
-    for (auto it = F->arg_begin(); it != F->arg_end(); ++it) {
-      args.push_back(&*it);
-    }
-
-    BasicBlock *BB = BasicBlock::Create(*context_, "EntryBlock", F);
-    IRBuilder<> builder(BB);
-
-    builder.CreateCall(print_ref, std::vector<Value *>{args[1]});
-    Value *arg1 = builder.CreateCall(wrap_int, std::vector<Value *>{args[2]});
-    Value *arg2 = builder.CreateCall(wrap_int, std::vector<Value *>{args[3]});
-    Value *Sum = builder.CreateAdd(arg1, arg2);
-
-    builder.CreateRet(Sum);
-
-    void *result = engine_->getPointerToFunction(F);
-    return result;
-  }
-
   void *gen_transparent_wrapper(const char *name, char *signature, void *func_ptr) {
     FunctionType *func_type = ParseJavaSignature(signature, 2);
     if (func_type == nullptr) {
@@ -102,17 +67,28 @@ class Codegen {
     auto module = make_unique<Module>(std::string(name) + "_mod", *context_);
     auto M = module.get();
 
+    Function* wrap_ref = llvm::Function::Create(ParseJavaSignature("(L;)L;"),
+                                            Function::ExternalLinkage,
+                                            "wrap_ref", M);
     Function *F = cast<Function>(M->getOrInsertFunction(name, func_type));
-    std::vector<Value *>args;
+    BasicBlock *BB = BasicBlock::Create(*context_, "", F);
+    IRBuilder<> builder(BB);
+    std::vector<Argument *> args;
     for (auto it = F->arg_begin(); it != F->arg_end(); ++it) {
       args.push_back(&*it);
     }
 
-    BasicBlock *BB = BasicBlock::Create(*context_, "", F);
-    IRBuilder<> builder(BB);
+    std::vector<Value *> values;
+    for (auto arg : args) {
+      if (arg->getType()->isPointerTy()) {
+        values.push_back(builder.CreateCall(wrap_ref, std::vector<Value *>{arg}));
+      } else {
+        values.push_back(arg);
+      }
+    }
 
     Value* func_value = builder.CreateIntToPtr(builder.getInt64((uint64_t)func_ptr),func_type->getPointerTo());
-    Value *ret = builder.CreateCall(func_value, args);
+    Value *ret = builder.CreateCall(func_value, values);
     builder.CreateRet(ret);
 
     engine_->addModule(std::move(module));
@@ -208,12 +184,14 @@ class Codegen {
 };
 
 void *gen_function(char* name_base, char *signature, void *func_ptr) {
+  static std::mutex g_mutex;
+  std::lock_guard<std::mutex> lock(g_mutex);
   static Codegen codegen;
   static int n = 0;
   std::string name = std::string(name_base) + "_ti_" + std::to_string(n++);
-  printf("Signature: %s\n", signature);
+  // printf("Signature: %s\n", signature);
   void *result = codegen.gen_transparent_wrapper(name.c_str(), signature, func_ptr);
-  printf("code generated for %s = %p\n", name.c_str(), result);
+  // printf("code generated for %s = %p\n", name.c_str(), result);
   return result;
 }
 
@@ -244,7 +222,7 @@ NativeMethodBind(jvmtiEnv *ti,
   char* signature_ptr = nullptr;
   ti->GetMethodName(method, &name_ptr, &signature_ptr, nullptr);
   std::string fname (name_ptr);
-  // if (fname == "add") {
+  // for (int i = 0; i < 20; ++i) {
     *new_address_ptr = gen_function(name_ptr, signature_ptr, address);
   // }
   ti->Deallocate((unsigned char *)name_ptr);
